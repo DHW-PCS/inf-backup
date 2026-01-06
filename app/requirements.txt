@@ -1,0 +1,2 @@
+resticpy<2
+pyyaml<7
