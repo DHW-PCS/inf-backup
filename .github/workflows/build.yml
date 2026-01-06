@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 0 * * 3"
-  push:
-    branches:
-      - main
+  # push:
+  #   branches:
+  #     - main
 jobs:
   push:
     name: "inf-backup"

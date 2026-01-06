@@ -18,18 +18,54 @@ def load_config(config_path="/home/container/config.yml"):
         sys.exit(1)
 
 def task_worker(command, args, repo_config):
-    """子进程：执行具体的 restic 操作"""
+    """子进程：执行具体的操作（restic 命令或本地辅助命令）"""
     try:
-        # 设置 resticpy 全局配置
-        restic.repository = repo_config['repository']
-        restic.password_file = repo_config.get('password_file')
-        # 如果配置中没有 password_file 但有 password，需要警告
-        if not restic.password_file and 'password' in repo_config:
-            print("[!] 警告: resticpy 需要 password_file 而不是 password 字符串")
-            print("[!] 请在配置文件中设置 password_file 路径")
-            return
-        
         target = repo_config['target_path']
+
+        # 本地命令：ls（列出目标目录第一层内容）
+        if command == "ls":
+            path = args[0] if args else target
+            if not os.path.exists(path):
+                print(f"[!] 错误: 目录不存在: {path}")
+                return
+            if not os.path.isdir(path):
+                print(f"[!] 错误: 不是目录: {path}")
+                return
+
+            print(f"[*] 列出目录第一层: {path}")
+            try:
+                entries = []
+                for entry in os.scandir(path):
+                    name = entry.name
+                    # 默认不显示隐藏项（类似 ls）
+                    if name.startswith('.'):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        name += '/'
+                    elif entry.is_symlink():
+                        name += '@'
+                    elif entry.is_file() and os.access(entry.path, os.X_OK):
+                        name += '*'
+                    entries.append(name)
+                entries.sort()
+                if entries:
+                    print("\n".join(entries))
+                else:
+                    print("[?] 目录为空。")
+            except PermissionError:
+                print("[!] 权限不足，无法访问该目录内容。")
+            return
+
+        # 需要 restic 的命令：仅在需要时配置 restic 环境
+        if command in ("backup", "check", "snapshots"):
+            # 设置 resticpy 全局配置
+            restic.repository = repo_config['repository']
+            restic.password_file = repo_config.get('password_file')
+            # 如果配置中没有 password_file 但有 password，需要警告
+            if not restic.password_file and 'password' in repo_config:
+                print("[!] 警告: resticpy 需要 password_file 而不是 password 字符串")
+                print("[!] 请在配置文件中设置 password_file 路径")
+                return
 
         if command == "backup":
             timestamp_tag = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -65,7 +101,8 @@ def main():
     print("=== Restic Python 控制台 ===")
     print(f"当前仓库: {config['repository']}")
     print(f"目标目录: {config['target_path']}")
-    print("支持命令: backup <tags>, check, snapshots, halt, exit")
+    print("支持命令: backup <tags>, check, snapshots, ls, halt, stop")
+    print("[Server thread/INFO]: Done (114.514s)! For help, type \"help\"")
     print("----------------------------")
 
     while True:
@@ -94,7 +131,7 @@ def main():
                 continue
 
             # 2. 处理退出程序
-            if cmd == "exit":
+            if cmd == "stop":
                 if current_process and current_process.is_alive():
                     current_process.terminate()
                 print("程序已退出。")
@@ -106,7 +143,7 @@ def main():
                 continue
 
             # 4. 路由命令到子进程
-            if cmd in ["backup", "check", "snapshots"]:
+            if cmd in ["backup", "check", "snapshots", "ls"]:
                 # if cmd == "restore" and not args:
                 #     print("[!] 错误: restore 命令需要快照 ID。")
                 #     continue
