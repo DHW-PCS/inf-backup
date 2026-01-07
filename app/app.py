@@ -21,6 +21,10 @@ def task_worker(command, args, repo_config):
     """子进程：执行具体的操作（restic 命令或本地辅助命令）"""
     try:
         target = repo_config['target_path']
+        
+        # 从配置中设置 TMPDIR 环境变量
+        if 'tmp_dir' in repo_config:
+            os.environ['TMPDIR'] = repo_config['tmp_dir']
 
         # 本地命令：ls（列出目标目录第一层内容）
         if command == "ls":
