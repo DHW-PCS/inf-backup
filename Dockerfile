@@ -4,7 +4,7 @@ LABEL author="DHW PCS Maintainers" maintainer="maintainers@dhw.one"
 
 LABEL org.opencontainers.image.source="https://github.com/DHW-PCS/inf-backup"
 
-RUN apk add --update --no-cache ca-certificates tzdata python3-dev py3-pip build-base unzip restic rclone 
+RUN apk add --update --no-cache ca-certificates tzdata python3 py3-pip build-base unzip restic rclone 
 RUN adduser -D -h /home/container container
 
 COPY ./app /app

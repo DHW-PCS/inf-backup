@@ -1,9 +1,23 @@
 import sys
 import os
+import json
 from datetime import datetime
 import yaml
 import multiprocessing
 import restic
+import restic.errors
+
+__version__ = "1.0.0"
+
+def _get_restic_version():
+    """返回已安装的 restic 二进制版本字符串"""
+    import subprocess
+    try:
+        result = subprocess.run(["restic", "version"], capture_output=True, text=True)
+        return result.stdout.strip().split(chr(10))[0]
+    except Exception:
+        return "restic (unknown)"
+
 
 def load_config(config_path="/home/container/config.yml"):
     """加载并解析 YAML 配置文件"""
@@ -16,6 +30,44 @@ def load_config(config_path="/home/container/config.yml"):
     except Exception as e:
         print(f"[!] 解析配置文件时出错: {e}")
         sys.exit(1)
+
+def _handle_restic_error(command, error_str):
+    """解析 restic 的 JSON 错误输出并给出可操作的提示"""
+    # 尝试从错误字符串中提取 JSON 消息体
+    json_start = error_str.find('{')
+    if json_start != -1:
+        try:
+            err_data = json.loads(error_str[json_start:])
+            code = err_data.get('code')
+            msg = err_data.get('message', '')
+
+            if code == 11:
+                print(f"[!] 仓库已被锁定: {msg}")
+                print("[!] 提示: 请先运行 restic unlock 清除残留锁")
+                return
+            elif code == 10:
+                print(f"[!] 仓库不存在或无法访问: {msg}")
+                return
+            elif code == 12:
+                print(f"[!] 密码错误: {msg}")
+                print("[!] 提示: 请检查密码文件内容是否正确")
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 无法解析具体错误码时，检查常见错误模式
+    if 'already locked' in error_str or 'lock' in error_str.lower():
+        print(f"[!] 仓库操作被锁定: {error_str.split(chr(10))[0]}")
+        print("[!] 提示: 请先运行 restic unlock 清除残留锁")
+    elif 'unable to open repository' in error_str:
+        print(f"[!] 无法打开仓库，请检查仓库地址与后端连接")
+    elif 'password' in error_str.lower():
+        print(f"[!] 密码或认证失败，请检查密码文件")
+    else:
+        # 只显示第一条错误信息，避免冗长的堆栈
+        first_line = error_str.split(chr(10))[0]
+        print(f"[!] restic {command} 失败: {first_line}")
+
 
 def task_worker(command, args, repo_config):
     """子进程：执行具体的操作（restic 命令或本地辅助命令）"""
@@ -95,18 +147,21 @@ def task_worker(command, args, repo_config):
         #     result = restic.restore(snapshot_id=snapshot_id, target_dir=target, exclude=repo_config.get('exclude_patterns', []))
         #     print(f"[+] 恢复完成:\n{result}")
 
+    except restic.errors.ResticFailedError as e:
+        _handle_restic_error(command, str(e))
+    except restic.errors.Error as e:
+        print(f"[!] restic 内部错误: {e}")
     except Exception as e:
-        print(f"[!] 执行 {command} 时发生错误: {e}")
+        print(f"[!] 执行 {command} 时发生未预期错误: {e}")
 
 def main():
     config = load_config()
     current_process = None
 
-    print("=== Restic Python 控制台 ===")
+    print(f"=== Restic 备份控制台 v{__version__} ===")
     print(f"当前仓库: {config['repository']}")
     print(f"目标目录: {config['target_path']}")
-    print("支持命令: backup <tags>, check, snapshots, ls, halt, stop")
-    print("[Server thread/INFO]: Done (114.514s)! For help, type \"help\"")
+    print("支持命令: backup <tags>, check, snapshots, ls, version, halt, stop")
     print("----------------------------")
 
     while True:
@@ -147,6 +202,11 @@ def main():
                 continue
 
             # 4. 路由命令到子进程
+            if cmd == "version":
+                print(f"Wrapper:  v{__version__}")
+                print(f"Restic:   {_get_restic_version()}")
+                continue
+
             if cmd in ["backup", "check", "snapshots", "ls"]:
                 # if cmd == "restore" and not args:
                 #     print("[!] 错误: restore 命令需要快照 ID。")
