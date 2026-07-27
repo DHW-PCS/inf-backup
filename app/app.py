@@ -162,6 +162,8 @@ def main():
     print(f"当前仓库: {config['repository']}")
     print(f"目标目录: {config['target_path']}")
     print("支持命令: backup <tags>, check, snapshots, ls, version, halt, stop")
+    # Pterodactyl 通过匹配 "Done" 来识别服务器已启动完成并标记为 running 状态，请勿删除此行
+    print("[Server thread/INFO]: Done (114.514s)! For help, type \"help\"")
     print("----------------------------")
 
     while True:
