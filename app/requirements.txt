@@ -1,2 +1,1 @@
-resticpy<2
-pyyaml<7
+PyYAML==6.0.3
