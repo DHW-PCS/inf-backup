@@ -13,7 +13,7 @@ Before changing code:
 3. Identify whether the change affects human rendering, protocol framing, task exclusion, persisted recovery state, Restic process control, or container packaging.
 4. Add focused offline tests with implementation changes and verify both interfaces when their shared controller changes.
 
-Base claims on current source, tests, or an approved local-container smoke test. Mocked tests alone do not establish that a Restic command works.
+Base claims on current source, offline tests, or explicitly approved isolated local Restic validation. Mocked tests alone do not establish that a Restic command works; state any unverified runtime behavior instead of requiring a container smoke test.
 
 ## Authority and Secrets
 
@@ -30,6 +30,7 @@ Base claims on current source, tests, or an approved local-container smoke test.
 - Human commands must never emit `INF_BACKUP_EVENT`, request IDs, Python representations, or raw Restic JSON.
 - Keep `backup` file/byte progress, automatic timestamp tags, readable snapshot summaries, and actionable Chinese error guidance.
 - `check` remains the ordinary metadata check; do not add `--read-data` by default.
+- `dry-run` is machine-only; do not expose it as a human command or interpret human backup tags as Restic flags.
 
 ### Machine Protocol
 
@@ -38,6 +39,7 @@ Base claims on current source, tests, or an approved local-container smoke test.
 - Protocol v1 events are limited to `accepted`, `progress`, `succeeded`, `failed`, `busy`, `interrupted`, and `unknown`.
 - Validate request IDs and operations before execution. `machine status REQUEST_ID` only replays state and must never execute or retry Restic.
 - Preserve strict Restic output validation: backup requires one valid summary and `snapshot_id`; snapshots requires an array; check requires exit status zero and a clean summary.
+- `machine run REQUEST_ID dry-run [TAG...]` maps to `restic --json backup --dry-run` and advertises the `dry-run` capability. It uses the same backup target, exclusions, tags, task slot, progress, cancellation, and recovery state. Success requires exit status zero, one summary, `dry_run: true`, and an absent or empty `snapshot_id`; it never establishes that a backup was created. This interface needs no additional container configuration.
 - Keep protocol changes coordinated with `inf_maintenance_tools`; add or update the cross-repository consumer test when the frame contract changes.
 
 ### Task and Recovery Safety
@@ -61,9 +63,9 @@ Base claims on current source, tests, or an approved local-container smoke test.
 | `app/app.py` | Configuration, human rendering, machine protocol, task state, Restic execution, and process control |
 | `app/requirements.txt` | Pinned Python runtime dependencies |
 | `tests/test_app.py` | Offline controller, protocol, parsing, recovery, and process-group tests |
-| `tests/container_smoke.py` | Temporary local Restic repository smoke test for human and machine interfaces |
+| `tests/test_consumer_contract.py` | Offline frame compatibility with a sibling `inf_maintenance_tools` checkout (skipped when unavailable) |
 | `Dockerfile` / `entrypoint-posix.sh` | Runtime image and Pterodactyl container entrypoint |
-| `.github/workflows/build.yml` | Offline tests, container smoke test, and multi-architecture image build |
+| `.github/workflows/build.yml` | Offline tests and multi-architecture image build |
 | `README.md` | Human-facing configuration, console, protocol, recovery, and deployment documentation |
 
 ## Validation
@@ -78,15 +80,13 @@ python -m black --check --line-length 100 --skip-string-normalization --skip-mag
 git diff --check
 ```
 
-When Restic execution, the Docker image, or either public interface changes, also run the local-container smoke test:
+Container smoke tests are not a required validation step. Do not restore the removed `tests/container_smoke.py` or its CI job. Never introduce or run smoke tests that mount the workspace's `container/` directory into a container to simulate a server environment, including indirect mounts or copies of that directory. This restriction applies to test scripts, CI jobs, and documented validation commands. Leave `container/` and its server data, configuration, and credentials untouched during validation.
+
+When the Docker image changes, also validate the multi-architecture build without running a simulated server container:
 
 ```sh
-docker build -t inf-backup-smoke:local .
-python tests/container_smoke.py inf-backup-smoke:local
 docker buildx build --platform linux/amd64,linux/arm64 --output type=cacheonly .
 ```
-
-The smoke test must use its generated Docker volume and temporary local repository, then remove them even on failure.
 
 ## Documentation and Hygiene
 

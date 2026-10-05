@@ -32,6 +32,8 @@ MACHINE_EVENTS = frozenset(
     {"accepted", "progress", "succeeded", "failed", "busy", "interrupted", "unknown"}
 )
 OPERATIONS = frozenset({"backup", "snapshots", "check"})
+MACHINE_OPERATIONS = OPERATIONS | {"dry-run"}
+BACKUP_OPERATIONS = frozenset({"backup", "dry-run"})
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 VERSION_RE = re.compile(r"\brestic\s+(\d+)\.(\d+)\.(\d+)\b", re.IGNORECASE)
 
@@ -389,7 +391,7 @@ class TaskController:
                     "protocol_version": PROTOCOL_VERSION,
                     "restic_version": restic_version,
                     "compatible": _restic_is_compatible(restic_version),
-                    "capabilities": ["backup", "snapshots", "check", "status"],
+                    "capabilities": ["backup", "snapshots", "check", "status", "dry-run"],
                 },
             )
         )
@@ -414,16 +416,17 @@ class TaskController:
             if self.active is not None:
                 self._busy(mode, request_id, operation)
                 return
-        if operation not in OPERATIONS:
+        allowed_operations = MACHINE_OPERATIONS if mode == "machine" else OPERATIONS
+        if operation not in allowed_operations:
             self._input_error(mode, request_id, operation, f"不支持的操作: {operation}")
             return
         try:
             if mode == "machine" and not REQUEST_ID_RE.fullmatch(request_id):
                 raise ConfigError("request_id 格式无效")
-            safe_args = _normalise_tags(args) if operation == "backup" else []
-            if operation == "backup":
+            safe_args = _normalise_tags(args) if operation in BACKUP_OPERATIONS else []
+            if operation in BACKUP_OPERATIONS:
                 safe_args.append(datetime.now().strftime("%Y%m%d%H%M%S"))
-            if operation != "backup" and args:
+            if operation not in BACKUP_OPERATIONS and args:
                 raise ConfigError(f"{operation} 不接受额外参数")
             restic_version = _get_restic_version(self.config)
             if not _restic_is_compatible(restic_version):
@@ -730,9 +733,14 @@ class TaskController:
             self._render_human_progress(payload)
 
     def _execute(self, task: ActiveTask, args: list[str]) -> dict[str, object]:
+        if task.operation == "dry-run" and task.mode != "machine":
+            raise ConfigError("dry-run 仅限 machine 接口")
         environment = _restic_environment(self.config)
-        command = [str(self.config["restic_path"]), "--json", task.operation]
-        if task.operation == "backup":
+        restic_operation = "backup" if task.operation == "dry-run" else task.operation
+        command = [str(self.config["restic_path"]), "--json", restic_operation]
+        if task.operation == "dry-run":
+            command.append("--dry-run")
+        if task.operation in BACKUP_OPERATIONS:
             for tag in args:
                 command.extend(["--tag", tag])
             for pattern in self.config["exclude_patterns"]:
@@ -747,6 +755,7 @@ class TaskController:
             encoding="utf-8",
             bufsize=1,
             env=environment,
+            shell=False,
             start_new_session=True,
         )
         self._set_process(task, process)
@@ -786,7 +795,7 @@ class TaskController:
                     f"restic {task.operation} 输出包含非对象记录", kind="invalid_output"
                 )
             parsed_lines.append(payload)
-            if task.operation == "backup" and payload.get("message_type") == "status":
+            if task.operation in BACKUP_OPERATIONS and payload.get("message_type") == "status":
                 current_files = payload.get("current_files")
                 progress = {
                     key: payload[key]
@@ -837,6 +846,13 @@ class TaskController:
                 f"restic {task.operation} 未返回唯一 summary", kind="invalid_output"
             )
         summary = summaries[0]
+        if task.operation == "dry-run":
+            if summary.get("dry_run") is not True or summary.get("snapshot_id", "") != "":
+                raise ResticOperationError(
+                    "restic dry-run summary 必须标明 dry_run 且不能包含快照 ID",
+                    kind="invalid_output",
+                )
+            return dict(summary)
         if task.operation == "backup":
             snapshot_id = summary.get("snapshot_id")
             if not isinstance(snapshot_id, str) or not snapshot_id:
@@ -910,7 +926,7 @@ def _handle_machine(controller: TaskController, parts: list[str]) -> None:
                         "kind": "invalid_request",
                         "message": (
                             "expected: machine run <request_id> "
-                            "<backup|snapshots|check> [tags...]"
+                            "<backup|snapshots|check|dry-run> [tags...]"
                         ),
                     },
                 )

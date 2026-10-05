@@ -86,6 +86,218 @@ class AppTestCase(unittest.TestCase):
         self.assertEqual(payload["request_id"], "handshake")
         self.assertEqual(payload["payload"]["protocol_version"], 1)
         self.assertTrue(payload["payload"]["compatible"])
+        self.assertEqual(
+            payload["payload"]["capabilities"],
+            ["backup", "snapshots", "check", "status", "dry-run"],
+        )
+
+    def test_machine_dry_run_stream_and_status_never_create_or_retry_backup(self) -> None:
+        controller = self.controller()
+        controller.config["exclude_patterns"] = ["/target/cache/**"]
+        controller.config["tmp_dir"] = str(Path(self.temporary.name) / "tmp")
+        controller.print_human = lambda message: self.fail(f"human output leaked: {message}")
+        stdout = (
+            '{"message_type":"status","files_done":2,"total_files":4,'
+            '"bytes_done":1024,"total_bytes":2048,"current_files":["/target/world"]}\n'
+            '{"message_type":"summary","dry_run":true,"total_files_processed":4,'
+            '"total_bytes_processed":2048,"data_added":512}\n'
+        )
+        output = StringIO()
+        with (
+            patch.object(app, "_get_restic_version", return_value="restic 0.18.1"),
+            patch("app.app.subprocess.Popen", return_value=FakeProcess(stdout)) as popen,
+            redirect_stdout(output),
+        ):
+            app._handle_machine(controller, ["machine", "run", "preview-1", "dry-run", "manual"])
+            self.wait(controller)
+            restarted = self.controller()
+            app._handle_machine(restarted, ["machine", "status", "preview-1"])
+        popen.assert_called_once()
+        records = []
+        for line in output.getvalue().splitlines():
+            self.assertTrue(line.startswith(app.PROTOCOL_PREFIX))
+            records.append(json.loads(line[len(app.PROTOCOL_PREFIX) :]))
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["accepted", "progress", "succeeded", "succeeded"],
+        )
+        self.assertTrue(all(record["operation"] == "dry-run" for record in records))
+        self.assertTrue(all(record["request_id"] == "preview-1" for record in records))
+        self.assertTrue(all(record["protocol"] == 1 for record in records))
+        self.assertEqual(records[-1], records[-2])
+        self.assertTrue(records[-1]["payload"]["dry_run"])
+        self.assertNotIn("snapshot_id", records[-1]["payload"])
+        self.assertEqual(records[1]["payload"]["current_file"], "/target/world")
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[:6], ["restic", "--json", "backup", "--dry-run", "--tag", "manual"]
+        )
+        self.assertEqual(command[-3:], ["--exclude", "/target/cache/**", str(self.target)])
+        self.assertEqual(command[6], "--tag")
+        self.assertRegex(command[7], r"^\d{14}$")
+        options = popen.call_args.kwargs
+        self.assertFalse(options["shell"])
+        self.assertTrue(options["start_new_session"])
+        self.assertEqual(options["env"]["RESTIC_PASSWORD_FILE"], str(self.password))
+        self.assertEqual(options["env"]["RESTIC_REPOSITORY"], self.config["repository"])
+        self.assertEqual(options["env"]["TMPDIR"], controller.config["tmp_dir"])
+
+    def test_dry_run_is_not_available_to_human_console_or_controller(self) -> None:
+        controller = self.controller()
+        lines: list[str] = []
+        controller.print_human = lines.append
+        controller.emit_machine = lambda record: self.fail(f"machine frame leaked: {record}")
+        with patch("app.app.subprocess.Popen") as popen:
+            controller.start("human", "human-request", "dry-run", [])
+            task = app.ActiveTask("human-request", "dry-run", "human")
+            with self.assertRaisesRegex(app.ConfigError, "仅限"):
+                controller._execute(task, [])
+        popen.assert_not_called()
+        self.assertTrue(any("不支持的操作" in line for line in lines))
+        output = StringIO()
+        with (
+            patch.object(app, "load_config", return_value=self.config),
+            patch("app.app.sys.stdin", StringIO("dry-run\nstop\n")),
+            patch("app.app.subprocess.Popen") as popen,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(app.main(), 0)
+        popen.assert_not_called()
+        self.assertIn("未知命令: dry-run", output.getvalue())
+        self.assertNotIn(app.PROTOCOL_PREFIX, output.getvalue())
+
+    def test_dry_run_rejects_invalid_requests_before_starting_restic(self) -> None:
+        for request_id, tags, version in (
+            ("bad/id", [], "restic 0.18.1"),
+            ("preview", ["bad tag"], "restic 0.18.1"),
+            ("preview", ["bad\x00tag"], "restic 0.18.1"),
+            ("preview", [], "restic 0.18.0"),
+        ):
+            with self.subTest(request_id=request_id, tags=tags, version=version):
+                controller = self.controller()
+                records = []
+                controller.emit_machine = records.append
+                with (
+                    patch.object(app, "_get_restic_version", return_value=version),
+                    patch("app.app.subprocess.Popen") as popen,
+                ):
+                    controller.start("machine", request_id, "dry-run", tags)
+                popen.assert_not_called()
+                self.assertIsNone(controller.active)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["event"], "failed")
+                self.assertEqual(records[0]["payload"]["kind"], "invalid_request")
+
+    def test_dry_run_requires_unique_explicit_dry_run_summary_without_snapshot(self) -> None:
+        good = '{"message_type":"summary","dry_run":true}\n'
+        for stdout in (
+            "",
+            good + good,
+            '{"message_type":"summary"}\n',
+            '{"message_type":"summary","dry_run":false}\n',
+            '{"message_type":"summary","dry_run":1}\n',
+            '{"message_type":"summary","dry_run":true,"snapshot_id":"abcdef12"}\n',
+            '{"message_type":"summary","dry_run":true,"snapshot_id":null}\n',
+            '[]\n',
+            'not json\n',
+        ):
+            with self.subTest(stdout=stdout):
+                controller = self.controller()
+                task = app.ActiveTask("preview", "dry-run", "machine")
+                controller.active = task
+                with (
+                    patch("app.app.subprocess.Popen", return_value=FakeProcess(stdout)),
+                    patch("app.app.os.killpg"),
+                    self.assertRaises(app.ResticOperationError) as caught,
+                ):
+                    controller._execute(task, [])
+                self.assertEqual(caught.exception.kind, "invalid_output")
+        with patch(
+            "app.app.subprocess.Popen",
+            return_value=FakeProcess(
+                '{"message_type":"summary","dry_run":true,"snapshot_id":""}\n'
+            ),
+        ):
+            self.assertTrue(controller._execute(task, [])["dry_run"])
+
+    def test_dry_run_nonzero_exit_is_failed_even_with_valid_summary(self) -> None:
+        controller = self.controller()
+        records = []
+        controller.emit_machine = records.append
+        fake = FakeProcess(
+            '{"message_type":"summary","dry_run":true}\n',
+            '{"message_type":"exit_error","message":"repository locked"}\n',
+            returncode=11,
+        )
+        with (
+            patch.object(app, "_get_restic_version", return_value="restic 0.18.1"),
+            patch("app.app.subprocess.Popen", return_value=fake),
+        ):
+            controller.start("machine", "preview", "dry-run", [])
+            self.wait(controller)
+        self.assertEqual([record["event"] for record in records], ["accepted", "failed"])
+        self.assertEqual(records[-1]["payload"]["kind"], "repository_locked")
+
+    def test_real_backup_still_requires_snapshot_id(self) -> None:
+        controller = self.controller()
+        task = app.ActiveTask("backup", "backup", "machine")
+        controller.active = task
+        with patch(
+            "app.app.subprocess.Popen",
+            return_value=FakeProcess('{"message_type":"summary","dry_run":true}\n'),
+        ) as popen:
+            with self.assertRaisesRegex(app.ResticOperationError, "缺少 snapshot_id"):
+                controller._execute(task, ["--dry-run"])
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["restic", "--json", "backup", "--tag", "--dry-run", str(self.target)],
+        )
+
+    def test_dry_run_shares_busy_guard_in_both_directions(self) -> None:
+        for first_mode, first_operation, second_mode, second_operation in (
+            ("human", "backup", "machine", "dry-run"),
+            ("machine", "dry-run", "human", "backup"),
+            ("machine", "dry-run", "machine", "check"),
+        ):
+            with self.subTest(first=first_operation, second=second_operation):
+                controller = self.controller()
+                controller.active = app.ActiveTask("active", first_operation, first_mode)
+                lines = []
+                records = []
+                controller.print_human = lines.append
+                controller.emit_machine = records.append
+                with patch.object(controller, "_execute") as execute:
+                    controller.start(second_mode, "other", second_operation, [])
+                execute.assert_not_called()
+                if second_mode == "human":
+                    self.assertTrue(any("上一个任务仍在运行" in line for line in lines))
+                    self.assertFalse(records)
+                else:
+                    self.assertEqual(records[0]["event"], "busy")
+                    self.assertEqual(records[0]["payload"]["active_operation"], first_operation)
+
+    def test_dry_run_cancellation_is_persisted_and_replayed_without_execution(self) -> None:
+        controller = self.controller()
+        task = app.ActiveTask("preview", "dry-run", "machine", cancel_requested=True)
+        controller.active = task
+        controller.store.begin(app._event("preview", "dry-run", "accepted"))
+        records = []
+        controller.emit_machine = records.append
+        controller.print_human = lambda message: self.fail(f"human output leaked: {message}")
+        with (
+            patch(
+                "app.app.subprocess.Popen", return_value=FakeProcess("", returncode=-15)
+            ) as popen,
+            patch("app.app.os.killpg") as kill_group,
+        ):
+            controller._run_task(task, [])
+            controller.status("preview")
+        popen.assert_called_once()
+        kill_group.assert_called_once_with(1234, app.signal.SIGTERM)
+        self.assertEqual([record["event"] for record in records], ["interrupted", "interrupted"])
+        self.assertEqual(records[0], records[1])
+        self.assertTrue(records[0]["payload"]["uncertain"])
+        self.assertIsNone(controller.active)
 
     def test_human_backup_is_friendly_and_never_emits_protocol_frames(self) -> None:
         controller = self.controller()
@@ -186,14 +398,17 @@ class AppTestCase(unittest.TestCase):
         self.assertEqual([record["event"] for record in machine_records], ["accepted", "succeeded"])
 
     def test_restart_marks_persisted_active_request_interrupted(self) -> None:
-        store = app.TaskStateStore(str(self.config["state_path"]))
-        store.begin(app._event("request", "backup", "accepted", {}))
-        restarted = app.TaskStateStore(str(self.config["state_path"]))
-        record = restarted.find("request")
-        self.assertIsNotNone(record)
-        assert record is not None
-        self.assertEqual(record["event"], "interrupted")
-        self.assertTrue(record["payload"]["uncertain"])
+        for operation in ("backup", "dry-run"):
+            with self.subTest(operation=operation):
+                store = app.TaskStateStore(str(self.config["state_path"]))
+                store.begin(app._event("request", operation, "accepted", {}))
+                restarted = app.TaskStateStore(str(self.config["state_path"]))
+                record = restarted.find("request")
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record["operation"], operation)
+                self.assertEqual(record["event"], "interrupted")
+                self.assertTrue(record["payload"]["uncertain"])
 
     def test_backup_json_stream_becomes_progress_and_summary(self) -> None:
         controller = self.controller()
