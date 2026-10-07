@@ -20,7 +20,7 @@ func TestVersionHelpAndConfigurationFailure(t *testing.T) {
 		code     int
 		contains string
 	}{
-		{[]string{"--version"}, 0, "3.0.0"},
+		{[]string{"--version"}, 0, "3.0.1"},
 		{[]string{"--help"}, 0, "--config"},
 		{[]string{"--config", filepath.Join(t.TempDir(), "missing.yml")}, 1, "配置错误"},
 	} {

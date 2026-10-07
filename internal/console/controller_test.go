@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"inf-backup/internal/config"
 	"inf-backup/internal/protocol"
@@ -116,7 +117,7 @@ func TestHumanInterfacesRemainReadable(t *testing.T) {
 		c.Wait()
 	}
 	text := out.String()
-	for _, expected := range []string{"v3.0.0", "Done (114.514s)!", "开始备份", "备份完成并创建快照", "2/4 个文件", "1.0 KiB/2.0 KiB", "abc12345", "共找到 1 个快照", "主机: offline", "仓库检查完成", "未知命令: dry-run"} {
+	for _, expected := range []string{"v3.0.1", "Done (114.514s)!", "开始备份", "备份完成并创建快照", "2/4 个文件", "1.0 KiB/2.0 KiB", "abc12345", "共找到 1 个快照", "主机: offline", "仓库检查完成", "未知命令: dry-run"} {
 		if !strings.Contains(text, expected) {
 			t.Fatal("human output missing:", expected)
 		}
@@ -142,7 +143,7 @@ func TestMachineCorrelationReplayAndNoDuplicateExecution(t *testing.T) {
 	c.Handle("machine run request-1 check")
 	c.Handle("machine status absent")
 	e := events(t, out)
-	if e[0].ID() != "handshake" || e[0].Payload["wrapper_version"] != "3.0.0" || e[0].Payload["compatible"] != true {
+	if e[0].ID() != "handshake" || e[0].Payload["wrapper_version"] != "3.0.1" || e[0].Payload["compatible"] != true || e[0].Payload["progress_interval_seconds"] != float64(3) {
 		t.Fatal("incorrect handshake")
 	}
 	if f.count() != 1 || e[1].Event != "accepted" || e[2].Event != "progress" || e[3].Event != "succeeded" || !reflect.DeepEqual(e[3], e[4]) || !reflect.DeepEqual(e[3], e[5]) || e[6].Event != "failed" || e[7].Event != "unknown" {
@@ -166,6 +167,67 @@ func TestMachineCorrelationReplayAndNoDuplicateExecution(t *testing.T) {
 	restarted.Status("request-1")
 	if f.count() != 1 {
 		t.Fatal("restart status retried task")
+	}
+}
+
+func TestProgressOutputIsBoundedWithFreshStatusAndImmediateTerminal(t *testing.T) {
+	for _, tc := range []struct{ mode, operation, terminal string }{
+		{"machine", "backup", "succeeded"},
+		{"machine", "dry-run", "succeeded"},
+		{"machine", "backup", "failed"},
+		{"machine", "backup", "interrupted"},
+		{"human", "backup", "succeeded"},
+		{"human", "backup", "failed"},
+		{"human", "backup", "interrupted"},
+	} {
+		t.Run(tc.mode+"-"+tc.operation+"-"+tc.terminal, func(t *testing.T) {
+			f := &fakeRunner{}
+			c, out := controller(t, f)
+			base := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)
+			now := base
+			c.now = func() time.Time { return now }
+			f.run = func(ctx context.Context, op string, tags []string, report func(map[string]any)) (map[string]any, error) {
+				// Simulate 602 updates over six seconds without sleeping. Only the
+				// first, 3-second and 6-second updates should reach the console.
+				for i := 0; i <= 601; i++ {
+					now = base.Add(time.Duration(i) * 10 * time.Millisecond)
+					report(map[string]any{"files_done": float64(i), "total_files": float64(1000), "bytes_done": float64(i * 1024), "total_bytes": float64(1024000)})
+					if i == 299 && tc.mode == "machine" {
+						c.Status("request")
+					}
+				}
+				if tc.terminal != "succeeded" {
+					return nil, &restic.Error{Message: "offline fixture failure", Kind: tc.terminal, Uncertain: true}
+				}
+				return map[string]any{"snapshot_id": "abc12345", "dry_run": op == "dry-run"}, nil
+			}
+			c.Start(tc.mode, "request", tc.operation, nil)
+			c.Wait()
+			if tc.mode == "machine" {
+				e := events(t, out)
+				if len(e) != 6 || e[0].Event != "accepted" || e[5].Event != tc.terminal {
+					t.Fatal("progress flood or delayed terminal:", e)
+				}
+				for i, count := range []float64{0, 299, 300, 600} {
+					if e[i+1].Event != "progress" || e[i+1].Payload["files_done"] != count {
+						t.Fatal("rate limit or latest status lost:", e)
+					}
+				}
+				c.Status("request")
+				e = events(t, out)
+				if !reflect.DeepEqual(e[5], e[6]) {
+					t.Fatal("terminal replay changed")
+				}
+			} else {
+				text := out.String()
+				if strings.Count(text, "[~]") != 3 || !strings.Contains(text, "300/1000 个文件") || !strings.Contains(text, "600/1000 个文件") || strings.Contains(text, protocol.Prefix) {
+					t.Fatal("human progress flood or unreadable progress:", text)
+				}
+				if tc.terminal == "succeeded" && !strings.Contains(text, "备份完成") || tc.terminal != "succeeded" && !strings.Contains(text, "offline fixture failure") {
+					t.Fatal("human terminal missing:", text)
+				}
+			}
+		})
 	}
 }
 

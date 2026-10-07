@@ -20,12 +20,15 @@ import (
 	"inf-backup/internal/state"
 )
 
+const progressInterval = 3 * time.Second
+
 type task struct {
 	id, operation, mode string
 	latest              protocol.Event
 	cancel              context.CancelFunc
 	done                chan struct{}
 	progressKey         string
+	lastProgress        time.Time
 }
 
 type Controller struct {
@@ -38,6 +41,7 @@ type Controller struct {
 	mu      sync.Mutex
 	active  *task
 	closing bool
+	now     func() time.Time
 }
 
 func New(ctx context.Context, cfg config.Config, out io.Writer, runner restic.Runner) (*Controller, error) {
@@ -48,7 +52,7 @@ func New(ctx context.Context, cfg config.Config, out io.Writer, runner restic.Ru
 	if runner == nil {
 		runner = restic.New(cfg)
 	}
-	return &Controller{cfg: cfg, out: out, runner: runner, store: store, version: runner.Version(ctx)}, nil
+	return &Controller{cfg: cfg, out: out, runner: runner, store: store, version: runner.Version(ctx), now: time.Now}, nil
 }
 
 func (c *Controller) human(text string) {
@@ -106,7 +110,8 @@ func (c *Controller) Protocol(id string) {
 	c.emit(protocol.New(id, "protocol", "succeeded", map[string]any{
 		"wrapper_version": protocol.WrapperVersion, "protocol_version": protocol.Version,
 		"restic_version": c.version, "compatible": restic.Compatible(c.version),
-		"capabilities": []string{"backup", "snapshots", "check", "status", "dry-run"},
+		"progress_interval_seconds": progressInterval.Seconds(),
+		"capabilities":              []string{"backup", "snapshots", "check", "status", "dry-run"},
 	}))
 }
 
@@ -216,11 +221,18 @@ func (c *Controller) run(ctx context.Context, t *task, tags []string) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		t.latest = protocol.New(t.id, t.operation, "progress", p)
+		// Retain every update for status recovery, but do not flood the panel's
+		// console or block Restic's output pipe on every status record.
+		now := c.now()
+		if !t.lastProgress.IsZero() && now.Sub(t.lastProgress) < progressInterval {
+			return
+		}
 		if t.mode == "machine" {
 			c.emit(t.latest)
 		} else if t.operation == "backup" {
 			c.renderProgress(t, p)
 		}
+		t.lastProgress = now
 	})
 	if err == nil {
 		terminal = protocol.New(t.id, t.operation, "succeeded", c.sanitize(payload).(map[string]any))

@@ -7,7 +7,7 @@ import (
 )
 
 const Version = 1
-const WrapperVersion = "3.0.0"
+const WrapperVersion = "3.0.1"
 const Prefix = "INF_BACKUP_EVENT "
 
 var requestID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)

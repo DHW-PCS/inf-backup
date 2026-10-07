@@ -14,7 +14,7 @@ FROM alpine:3.23.5
 LABEL author="DHW PCS Maintainers" maintainer="maintainers@dhw.one"
 
 LABEL org.opencontainers.image.source="https://github.com/DHW-PCS/inf-backup"
-LABEL org.opencontainers.image.version="3.0.0"
+LABEL org.opencontainers.image.version="3.0.1"
 
 RUN apk add --update --no-cache ca-certificates tzdata restic rclone
 RUN adduser -D -h /home/container container

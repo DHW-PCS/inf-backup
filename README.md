@@ -1,6 +1,8 @@
-# inf-backup 3.0.0
+# inf-backup 3.0.1
 
 `inf-backup` is the Go Restic controller used by the DHW Inf Pterodactyl server. Version 3 replaces the Python 2.0.0 application with one executable. It keeps the default human console and machine protocol v1 used by `inf-tools-go` and the older Python maintenance tools.
+
+Version 3.0.1 limits backup progress output to one update every 3 seconds while keeping the latest status available for recovery. Task acceptance, completion, failures and interruption remain immediate. The companion maintenance tools display the full progress metrics and final backup summary.
 
 ## Build and run
 
@@ -45,7 +47,7 @@ halt
 stop
 ```
 
-`backup` adds a timestamp tag automatically and reports file/byte progress. Tags are always passed as values, including a tag that looks like `--dry-run`. `snapshots` renders a readable inventory. `check` runs the normal metadata consistency check without `--read-data`. `ls [PATH]` lists the first level of a directory, omitting hidden entries and marking directories and symlinks.
+`backup` adds a timestamp tag automatically and reports file/byte progress. The first progress update appears immediately; subsequent updates are limited to one every 3 seconds. Completion and errors appear immediately. Tags are always passed as values, including a tag that looks like `--dry-run`. `snapshots` renders a readable inventory. `check` runs the normal metadata consistency check without `--read-data`. `ls [PATH]` lists the first level of a directory, omitting hidden entries and marking directories and symlinks.
 
 `halt` cancels the active task. `stop` cancels active work and exits. Cancellation sends SIGTERM to the full Restic process group, then SIGKILL after a ten-second grace period if necessary, including descendants such as rclone. Human and machine work share one exclusive task slot. Human task output never prints protocol frames, request IDs or raw Restic JSON.
 
@@ -64,9 +66,11 @@ machine status REQUEST_ID
 
 Frames are single lines beginning with `INF_BACKUP_EVENT ` followed by a JSON object containing `protocol`, `request_id`, `operation`, `event`, and `payload`. Valid IDs contain 1–64 ASCII letters, digits, dots, underscores or hyphens and begin with a letter or digit. The optional protocol ID is `null` when omitted.
 
-The handshake includes `wrapper_version: "3.0.0"`, `protocol_version: 1`, the Restic version, `compatible`, and capabilities `backup`, `snapshots`, `check`, `status`, `dry-run`. An incompatible or unavailable Restic reports `compatible: false`; operations are refused before task execution.
+The handshake includes `wrapper_version: "3.0.1"`, `protocol_version: 1`, the Restic version, `compatible`, capabilities `backup`, `snapshots`, `check`, `status`, `dry-run`, and the additive `progress_interval_seconds: 3`. Consumers can use this interval to avoid applying a second throttle to already bounded progress. An incompatible or unavailable Restic reports `compatible: false`; operations are refused before task execution.
 
 Events remain `accepted`, `progress`, `succeeded`, `failed`, `busy`, `interrupted`, and `unknown`. Terminal events are `succeeded`, `failed`, or `interrupted`. Backup success requires exit status zero, exactly one summary and a nonempty `snapshot_id`. Snapshots must return an array of objects. Check requires exit status zero and a unique clean summary. Progress carries file/byte counts and optional current-file information. See the [Restic JSON format](https://restic.readthedocs.io/en/stable/075_scripting.html#json-output).
+
+Backup and dry-run emit the first `progress` immediately, then at most one update every 3 seconds. Intermediate updates replace the latest in-memory state without queuing console output. `accepted` and terminal events bypass this limit. Explicit status or duplicate-request queries still replay the latest state immediately, including progress that has not been broadcast. Consumers should listen for events and use status for reconnection rather than continuously polling.
 
 `dry-run` is machine-only. It runs `restic --json backup --dry-run` with the same target, exclusions, tags, task slot, progress, cancellation and persisted status. Success requires a unique summary with `dry_run: true` and an absent or empty `snapshot_id`. It does not create a verified backup. It still accesses the repository, reads source files and can update local caches and the state journal.
 
@@ -85,13 +89,13 @@ Configure the maintenance workspace's `PTERODACTYL_RESTIC_SERVER` with this wrap
 ./bin/inf-maintenance restic check
 ```
 
-The CLI and WebUI use the same client. Before backup/save work, it checks wrapper power and the correlated protocol handshake. It pauses Minecraft autosave when needed, restores autosave during cleanup, and independently lists snapshots to verify the reported snapshot ID. JWT recovery sends `machine status REQUEST_ID` and never resends the original operation. A dry-run cannot satisfy a full upgrade's backup requirement.
+The CLI and WebUI use the same client. Before backup/save work, it checks wrapper power and the correlated protocol handshake. It pauses Minecraft autosave when needed, restores autosave during cleanup, and independently lists snapshots to verify the reported snapshot ID. Each progress update carries percentage, file/byte counts, elapsed time, estimated remaining time, errors and the current file when available; the maintenance tools also display the final Restic summary. Progress rendering and persistence are limited to one combined update every 3 seconds when using older wrappers. JWT recovery sends `machine status REQUEST_ID` and never resends the original operation. A dry-run cannot satisfy a full upgrade's backup requirement.
 
 ## Upgrading from 2.0.0
 
 Keep `config.yml`, the password file, source mounts, rclone configuration and `.inf-backup-protocol.json` in their existing locations. The image declares a fixed Docker `ENTRYPOINT`; its script always executes `/usr/local/bin/inf-backup --config /home/container/config.yml`, ignoring command arguments and Pterodactyl's `STARTUP` value entirely. Existing Python startup settings need no panel change and are never expanded, evaluated or printed. For standalone use outside the image, the executable still accepts `--config PATH`. The existing Pterodactyl ready marker remains unchanged.
 
-Deploy the wrapper first and verify its human console and `machine protocol` handshake. Then use the Go maintenance tools with the correct backup server ID. Application version 3.0.0 does not change the wire protocol version. The image workflow publishes `3.0.0`, `3`, `latest`, and commit-SHA tags.
+Deploy the wrapper first and verify its human console and `machine protocol` handshake. Then use the Go maintenance tools with the correct backup server ID. Application version 3.0.1 does not change the wire protocol version. The image workflow publishes `3.0.1`, `3`, `latest`, and commit-SHA tags.
 
 ## Development
 

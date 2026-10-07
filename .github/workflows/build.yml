@@ -50,5 +50,5 @@ jobs:
           tags: |
             ghcr.io/dhw-pcs/inf-backup:latest
             ghcr.io/dhw-pcs/inf-backup:3
-            ghcr.io/dhw-pcs/inf-backup:3.0.0
+            ghcr.io/dhw-pcs/inf-backup:3.0.1
             ghcr.io/dhw-pcs/inf-backup:${{ github.sha }}
