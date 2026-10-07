@@ -3,4 +3,12 @@
 __pycache__
 *.pyc
 tests
-app/test.py
+app
+container
+bin
+consumer
+.env
+config.yml
+restic-password
+.inf-backup-protocol.json
+.inf-backup-state-*.tmp

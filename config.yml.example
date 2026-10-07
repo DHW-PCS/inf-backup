@@ -1,0 +1,8 @@
+repository: rclone:remote:inf
+target_path: /mnt/server
+password_file: /home/container/restic-password
+tmp_dir: /home/container/tmp
+restic_path: restic
+state_path: /home/container/.inf-backup-protocol.json
+exclude_patterns:
+  - /mnt/server/cache/**

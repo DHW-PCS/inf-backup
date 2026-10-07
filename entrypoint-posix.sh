@@ -11,18 +11,6 @@ export INTERNAL_IP
 # Switch to the container's working directory
 cd /home/container || exit 1
 
-# Convert all of the "{{VARIABLE}}" parts of the command into the expected shell
-# variable format of "${VARIABLE}" before evaluating the string and automatically
-# replacing the values.
-if [ -n "${STARTUP:-}" ]; then
-    PARSED=$(printf '%s' "$STARTUP" | sed -e 's/{{/${/g' -e 's/}}/}/g')
-    # Expand variables while preserving whitespace
-    PARSED=$(eval "echo \"$PARSED\"")
-else
-    PARSED=""
-fi
-
-# Display the command we're running, and then execute it with the env from the container itself.
-printf '\033[1m\033[33mcontainer@pterodactyl~ \033[0m%s\n' "$PARSED"
-# shellcheck disable=SC2086
-exec env $PARSED
+# The image owns startup. Pterodactyl's STARTUP setting is intentionally ignored.
+printf '\033[1m\033[33mcontainer@pterodactyl~ \033[0mStarting inf-backup\n'
+exec /usr/local/bin/inf-backup --config /home/container/config.yml

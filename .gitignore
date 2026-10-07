@@ -5,3 +5,9 @@ container/
 __pycache__/
 *.pyc
 test.*
+bin/
+.env
+config.yml
+restic-password
+.inf-backup-protocol.json
+.inf-backup-state-*.tmp

@@ -10,13 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
-          cache: pip
-      - run: python -m pip install -r app/requirements.txt
-      - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q app tests
+          go-version: "1.25.0"
+          cache: true
+      - uses: actions/checkout@v4
+        if: ${{ vars.INF_TOOLS_GO_REPOSITORY != '' }}
+        with:
+          repository: ${{ vars.INF_TOOLS_GO_REPOSITORY }}
+          path: consumer
+      - run: make check
+        env:
+          INF_TOOLS_GO_ROOT: ${{ vars.INF_TOOLS_GO_REPOSITORY != '' && format('{0}/consumer', github.workspace) || '' }}
+      - run: make build
   push:
     name: "inf-backup"
     needs: test
@@ -43,4 +49,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/dhw-pcs/inf-backup:latest
+            ghcr.io/dhw-pcs/inf-backup:3
+            ghcr.io/dhw-pcs/inf-backup:3.0.0
             ghcr.io/dhw-pcs/inf-backup:${{ github.sha }}

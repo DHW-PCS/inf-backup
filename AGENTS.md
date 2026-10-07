@@ -1,95 +1,61 @@
-# Agent Guide: inf-backup
+# Agent Guide: inf-backup (Go 3)
 
-This file is the execution contract for agents working in this repository.
+This file is the execution contract for agents working in this repository. `inf-backup` runs Restic inside a Pterodactyl container. Preserve the human console as the permanent default interface and `machine` as the only automation namespace.
 
-`inf-backup` runs Restic inside a Pterodactyl container. Preserve the human console as the permanent default interface and the `machine` namespace as the only automation protocol.
+## Working posture
 
-## Working Posture
+Before changing code, inspect `cmd/inf-backup`, the relevant `internal` packages and tests, `README.md`, `Dockerfile`, `entrypoint-posix.sh`, and `.github/workflows/build.yml`. Run `git status --short --branch` and preserve user-owned modifications and untracked files. Identify effects on human rendering, framing, task exclusion, recovery state, process control and packaging. Add focused offline behavioral tests for those changes and verify both interfaces when their shared controller changes.
 
-Before changing code:
+Base claims on current source, offline tests or explicitly approved isolated local Restic validation. Mocked tests alone do not establish that a Restic command works; state unverified runtime behavior instead of requiring a container smoke test.
 
-1. Inspect `app/app.py`, focused tests, `README.md`, `Dockerfile`, `entrypoint-posix.sh`, and `.github/workflows/build.yml`.
-2. Run `git status --short --branch`; preserve all user-owned modifications and untracked files.
-3. Identify whether the change affects human rendering, protocol framing, task exclusion, persisted recovery state, Restic process control, or container packaging.
-4. Add focused offline tests with implementation changes and verify both interfaces when their shared controller changes.
+## Authority and secrets
 
-Base claims on current source, offline tests, or explicitly approved isolated local Restic validation. Mocked tests alone do not establish that a Restic command works; state any unverified runtime behavior instead of requiring a container smoke test.
+- Repository work and routine validation never authorize deployment, live panel commands, production backup creation, snapshots or check.
+- Keep tests offline. Use process fixtures or explicitly approved temporary local Restic repositories. Never use production repositories, password files, rclone remotes or mounted server data.
+- Never print or commit passwords, repository credentials, private keys, panel credentials or live protocol-state data. Do not read passwords for logging. Sanitize diagnostic messages before output and persistence.
+- Leave `container/`, including its data, configuration and credentials, untouched. Do not introduce smoke tests or validation commands that mount or copy it into a simulated container. Container smoke tests are not required.
 
-## Authority and Secrets
+## Interface contracts
 
-- Repository work and routine validation do not authorize deployment, live Pterodactyl commands, production backup creation, production `snapshots`, or production `check`.
-- Keep tests offline and use only temporary local Restic repositories. Never use a production repository, password file, rclone remote, or mounted server data.
-- Never commit or print Restic passwords, repository credentials, private keys, Pterodactyl credentials, or protocol-state data from a live installation.
-- Deployment and any live Restic operation require separate explicit approval.
+- Human commands remain `backup`, `snapshots`, `check`, `ls`, `version`, `halt`, and `stop`, with readable Chinese output. Never emit machine frames, request IDs or raw Restic JSON from human tasks.
+- Preserve file/byte progress, automatic timestamp tags, readable snapshot summaries and actionable guidance. Ordinary check never adds `--read-data`. Human tags cannot become Restic flags; dry-run is machine-only.
+- Protocol v1 frames contain `protocol`, `request_id`, `operation`, `event`, and `payload` on one line after `INF_BACKUP_EVENT `. Events are only `accepted`, `progress`, `succeeded`, `failed`, `busy`, `interrupted`, and `unknown`.
+- Validate IDs and operations before execution. Status and retained duplicate run requests only replay state. Never retry unknown, interrupted, timed-out or console-lost work automatically.
+- Backup requires zero exit, exactly one summary and a nonempty snapshot ID. Snapshots requires an object array. Check requires zero exit and a clean summary.
+- `machine run ID dry-run [TAG...]` maps to `restic --json backup --dry-run` and advertises `dry-run`. It shares target, exclusions, tags, task slot, progress, cancellation and state. Success requires zero exit, a unique `dry_run: true` summary and an absent or empty snapshot ID. It cannot establish backup creation.
+- Preserve compatibility with `inf-tools-go` and legacy Python consumers. Run the cross-project test after framing or recovery changes.
 
-## Interface Contracts
+## Task, recovery and process safety
 
-### Human Console
+- Human and machine tasks share one exclusive controller slot. No parallel Restic execution path.
+- Atomically store the active request and most recent 32 terminal records with private permissions. Preserve the Python v2 journal schema. Recovered active requests become uncertain `interrupted` records. Do not overwrite malformed recovery evidence.
+- Never downgrade verified success because terminal persistence failed; expose `state_persisted: false`. Do not release the task slot until output, persistence and process cleanup finish.
+- Launch Restic using argument arrays without a shell and in a new process session. Halt, stop, EOF and SIGINT/SIGTERM terminate the complete process group, escalating to SIGKILL after the bounded grace period, including descendants that outlive the leader.
+- Use `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE`, and `TMPDIR`. Reject inline config passwords and remove conflicting inherited password/repository sources.
+- Preserve Restic >= 0.18.1, pinned Alpine 3.23.5 and the Pterodactyl ready marker. Go 3 intentionally removes Python and PyYAML runtime dependencies.
+- The container entrypoint must ignore Pterodactyl's `STARTUP` and directly exec `/usr/local/bin/inf-backup --config /home/container/config.yml`. Never evaluate, expand or print the panel startup value.
 
-- `backup`, `snapshots`, `check`, `ls`, `version`, `halt`, and `stop` remain human-facing commands with readable text output.
-- Human commands must never emit `INF_BACKUP_EVENT`, request IDs, Python representations, or raw Restic JSON.
-- Keep `backup` file/byte progress, automatic timestamp tags, readable snapshot summaries, and actionable Chinese error guidance.
-- `check` remains the ordinary metadata check; do not add `--read-data` by default.
-- `dry-run` is machine-only; do not expose it as a human command or interpret human backup tags as Restic flags.
-
-### Machine Protocol
-
-- Structured output is available only under `machine`: `protocol`, `run`, and `status`.
-- Every frame is one line beginning with `INF_BACKUP_EVENT ` followed by a JSON object containing `protocol`, `request_id`, `operation`, `event`, and `payload`.
-- Protocol v1 events are limited to `accepted`, `progress`, `succeeded`, `failed`, `busy`, `interrupted`, and `unknown`.
-- Validate request IDs and operations before execution. `machine status REQUEST_ID` only replays state and must never execute or retry Restic.
-- Preserve strict Restic output validation: backup requires one valid summary and `snapshot_id`; snapshots requires an array; check requires exit status zero and a clean summary.
-- `machine run REQUEST_ID dry-run [TAG...]` maps to `restic --json backup --dry-run` and advertises the `dry-run` capability. It uses the same backup target, exclusions, tags, task slot, progress, cancellation, and recovery state. Success requires exit status zero, one summary, `dry_run: true`, and an absent or empty `snapshot_id`; it never establishes that a backup was created. This interface needs no additional container configuration.
-- Keep protocol changes coordinated with `inf_maintenance_tools`; add or update the cross-repository consumer test when the frame contract changes.
-
-### Task and Recovery Safety
-
-- Human and machine work share one controller and one exclusive task slot. Never create a bypass lock or parallel Restic execution path.
-- Store the active request and the most recent 32 terminal records atomically. On startup, convert a persisted active request to `interrupted` with an uncertain result.
-- Never blindly retry an interrupted, unknown, timed-out, or console-lost backup; direct the caller to inspect snapshots first.
-- Start Restic in a new process session. `halt` and `stop` must terminate the complete process group, escalating from `SIGTERM` to `SIGKILL` after the bounded grace period.
-
-## Restic and Container Contracts
-
-- Invoke Restic with argument arrays and `shell=False`; do not construct shell command strings.
-- Pass repository, password file, and temporary-directory settings through `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE`, and `TMPDIR`. Reject inline passwords.
-- Preserve the minimum Restic version check (`>=0.18.1`), the pinned Alpine patch release, and the pinned PyYAML dependency unless a tested upgrade intentionally changes them.
-- Keep the Pterodactyl startup-ready marker printed by `app/app.py`.
-
-## Repository Map
+## Repository map
 
 | Path | Ownership |
 | --- | --- |
-| `app/app.py` | Configuration, human rendering, machine protocol, task state, Restic execution, and process control |
-| `app/requirements.txt` | Pinned Python runtime dependencies |
-| `tests/test_app.py` | Offline controller, protocol, parsing, recovery, and process-group tests |
-| `tests/test_consumer_contract.py` | Offline frame compatibility with a sibling `inf_maintenance_tools` checkout (skipped when unavailable) |
-| `Dockerfile` / `entrypoint-posix.sh` | Runtime image and Pterodactyl container entrypoint |
-| `.github/workflows/build.yml` | Offline tests and multi-architecture image build |
-| `README.md` | Human-facing configuration, console, protocol, recovery, and deployment documentation |
+| `cmd/inf-backup` | Flags, signals, stdin loop and shutdown |
+| `internal/config` | YAML validation, environment, tags and credential redaction |
+| `internal/console` | Shared controller, human rendering, command routing and protocol output |
+| `internal/protocol` | Version constants and event framing |
+| `internal/restic` | Session/process-group control, progress and strict JSON validation |
+| `internal/state` | Atomic compatible recovery journal |
+| `scripts/consumer-contract.sh` | Offline contract with sibling inf-tools-go |
+| `Dockerfile`, `entrypoint-posix.sh`, `.github/workflows/build.yml` | Container and multi-architecture packaging |
 
-## Validation
+## Validation and documentation
 
-Use Python 3.13 for repository tests:
+Run `make check`, `make build`, and `git diff --check`. Tests use only temporary local files and fake Restic subprocesses. The cross-project check is automatic when sibling inf-tools-go exists; an explicit `INF_TOOLS_GO_ROOT` requires it. A consumer contract change must update `internal/workflow/backup_go_contract_test.go` in that workspace as well.
 
-```sh
-python -m pip install -r app/requirements.txt
-python -m unittest discover -s tests -p 'test_*.py' -v
-python -m compileall -q app tests
-python -m black --check --line-length 100 --skip-string-normalization --skip-magic-trailing-comma app tests
-git diff --check
-```
-
-Container smoke tests are not a required validation step. Do not restore the removed `tests/container_smoke.py` or its CI job. Never introduce or run smoke tests that mount the workspace's `container/` directory into a container to simulate a server environment, including indirect mounts or copies of that directory. This restriction applies to test scripts, CI jobs, and documented validation commands. Leave `container/` and its server data, configuration, and credentials untouched during validation.
-
-When the Docker image changes, also validate the multi-architecture build without running a simulated server container:
+When Docker changes, validate both architectures without starting a simulated server:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 --output type=cacheonly .
 ```
 
-## Documentation and Hygiene
-
-- When configuration, commands, protocol fields, versions, deployment order, or recovery behavior changes, update `README.md`, tests, container configuration, and this guide together.
-- Keep AI-only execution restrictions in this file and keep `README.md` focused on maintainers and protocol consumers.
-- Do not commit `.venv`, bytecode, caches, local images, temporary repositories, state journals, or secrets.
+Keep README, config example, flags, protocol fields, versions, startup instructions and this guide synchronized. Keep agent-only authority restrictions here. Never commit binaries, caches, temporary repositories, journals or secrets.
