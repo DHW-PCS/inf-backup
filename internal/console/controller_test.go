@@ -420,3 +420,25 @@ func TestErrorsAndJournalRedactRepositoryCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestScannerLagProgressInBothInterfaces(t *testing.T) {
+	for _, mode := range []string{"human", "machine"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeRunner{run: func(ctx context.Context, op string, tags []string, report func(map[string]any)) (map[string]any, error) {
+				report(map[string]any{"percent_done": 1.5, "files_done": float64(3), "total_files": float64(2), "bytes_done": float64(3072), "total_bytes": float64(2048)})
+				return map[string]any{"snapshot_id": "abc12345"}, nil
+			}}
+			c, out := controller(t, f)
+			c.Start(mode, "request", "backup", nil)
+			c.Wait()
+			if mode == "machine" {
+				e := events(t, out)
+				if len(e) != 3 || e[1].Event != "progress" || e[1].Payload["percent_done"] != 1.5 || e[1].Payload["files_done"] != float64(3) || e[1].Payload["total_files"] != float64(2) || e[2].Event != "succeeded" {
+					t.Fatal("scanner lag corrupted protocol:", e)
+				}
+			} else if text := out.String(); !strings.Contains(text, "3/2 个文件") || !strings.Contains(text, "备份完成") || strings.Contains(text, protocol.Prefix) {
+				t.Fatal("scanner lag corrupted human output:", text)
+			}
+		})
+	}
+}

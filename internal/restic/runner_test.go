@@ -220,7 +220,7 @@ func TestProgressAndExitClassification(t *testing.T) {
 			}
 		})
 	}
-	for _, status := range []string{`{"files_done":-1}`, `{"files_done":true}`, `{"files_done":2,"total_files":1}`} {
+	for _, status := range []string{`{"files_done":-1}`, `{"files_done":true}`, `{"files_done":0.5}`, `{"total_bytes":-1}`, `{"percent_done":-0.1}`} {
 		var payload map[string]any
 		_ = json.Unmarshal([]byte(status), &payload)
 		if _, err := progressPayload(payload); err == nil {
@@ -298,6 +298,51 @@ func testCancellationGroup(t *testing.T, mode string) {
 			if time.Now().After(deadline) {
 				t.Fatalf("process %d remains alive", pid)
 			}
+		}
+	}
+}
+
+func TestBackupProgressMayOutrunScanner(t *testing.T) {
+	for _, op := range []string{"backup", "dry-run"} {
+		for _, ending := range []string{"success", "missing-summary", "missing-id", "nonzero-exit"} {
+			t.Run(op+"/"+ending, func(t *testing.T) {
+				r := fixture(t)
+				statuses := []string{
+					`{"message_type":"status","files_done":1,"bytes_done":1024,"percent_done":0}`,
+					`{"message_type":"status","files_done":2,"total_files":0,"bytes_done":2048,"total_bytes":0,"percent_done":0}`,
+					`{"message_type":"status","files_done":3,"total_files":2,"bytes_done":3072,"total_bytes":2048,"percent_done":1.5}`,
+					`{"message_type":"status","files_done":4,"total_files":4,"bytes_done":4096,"total_bytes":4096,"percent_done":1}`,
+				}
+				output := strings.Join(statuses, "\n") + "\n"
+				if ending != "missing-summary" {
+					summary := `{"message_type":"summary","snapshot_id":"abc12345"}`
+					if op == "dry-run" {
+						summary = `{"message_type":"summary","dry_run":true}`
+					}
+					if ending == "missing-id" {
+						summary = `{"message_type":"summary"}`
+					}
+					output += summary + "\n"
+				}
+				t.Setenv("INF_BACKUP_TEST_STDOUT", output)
+				if ending == "nonzero-exit" {
+					t.Setenv("INF_BACKUP_TEST_EXIT", "3")
+				}
+				var updates []map[string]any
+				_, err := r.Run(context.Background(), op, nil, func(p map[string]any) { updates = append(updates, p) })
+				if (err == nil) != (ending == "success") {
+					t.Fatalf("completion validation changed: %v", err)
+				}
+				if len(updates) != 4 || updates[2]["files_done"] != float64(3) || updates[2]["total_files"] != float64(2) || updates[2]["bytes_done"] != float64(3072) || updates[2]["total_bytes"] != float64(2048) || updates[2]["percent_done"] != 1.5 {
+					t.Fatalf("scanner estimates stopped work or changed counters: %+v", updates)
+				}
+				if err != nil && op == "backup" {
+					var failure *Error
+					if !errors.As(err, &failure) || !failure.Uncertain {
+						t.Fatal("failed backup lost uncertainty:", err)
+					}
+				}
+			})
 		}
 	}
 }

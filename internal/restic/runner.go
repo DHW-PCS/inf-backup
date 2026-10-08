@@ -335,18 +335,14 @@ func progressPayload(payload map[string]any) (map[string]any, error) {
 			continue
 		}
 		n, ok := value.(float64)
-		if !ok || n < 0 || (key != "percent_done" && (math.Trunc(n) != n || n >= math.Exp2(63))) {
+		if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || (key != "percent_done" && (math.Trunc(n) != n || n >= math.Exp2(63))) {
 			return nil, invalid("Restic 进度包含无效数值")
 		}
 		p[key] = n
 	}
-	for _, unit := range []string{"files", "bytes"} {
-		done, hasDone := p[unit+"_done"].(float64)
-		total, hasTotal := p["total_"+unit].(float64)
-		if hasDone && hasTotal && done > total {
-			return nil, invalid("Restic 进度超过总数")
-		}
-	}
+	// Restic updates scanned totals independently of processed counts.
+	// Totals can lag behind work, and percent_done can exceed 1.
+	// Preserve these estimates; only exit status and summary establish success.
 	if files, ok := payload["current_files"].([]any); ok && len(files) > 0 {
 		if file, ok := files[0].(string); ok {
 			p["current_file"] = file
